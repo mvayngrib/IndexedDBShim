@@ -1,9 +1,10 @@
 /*jshint globalstrict: true*/
 'use strict';
+define('indexedDBShim', ['taskQueue', 'utils'], function(TaskQueue, U) {
 /**
  * An initialization file that checks for conditions, removes console.log and warn, etc
  */
-var idbModules = {};
+var idbModules = window.idbModules = {};
 /*jshint globalstrict: true*/
 'use strict';
 (function(idbModules) {
@@ -319,36 +320,6 @@ var idbModules = {};
 
                 var px = /^\$(?:\[(?:\d+|\"(?:[^\\\"\u0000-\u001f]|\\([\\\"\/bfnrt]|u[0-9a-zA-Z]{4}))*\")\])*$/;
                 
-                /**
-                 * Converts the specified data URL to a Blob object
-                 * @param {String} dataURL to convert to a Blob
-                 * @returns {Blob} the converted Blob object
-                 */
-                function dataURLToBlob(dataURL) {
-                    var BASE64_MARKER = ';base64,',
-                        contentType,
-                        parts,
-                        raw;
-                    if (dataURL.indexOf(BASE64_MARKER) === -1) {
-                        parts = dataURL.split(',');
-                        contentType = parts[0].split(':')[1];
-                        raw = parts[1];
-
-                        return new Blob([raw], {type: contentType});
-                    }
-
-                    parts = dataURL.split(BASE64_MARKER);
-                    contentType = parts[0].split(':')[1];
-                    raw = window.atob(parts[1]);
-                    var rawLength = raw.length;
-                    var uInt8Array = new Uint8Array(rawLength);
-
-                    for (var i = 0; i < rawLength; ++i) {
-                        uInt8Array[i] = raw.charCodeAt(i);
-                    }
-                    return new Blob([uInt8Array.buffer], {type: contentType});
-                }
-                
                 function rez(value) {
                     // The rez function walks recursively through the object looking for $ref
                     // properties. When it finds one that has a value that is a path, then it
@@ -375,7 +346,7 @@ var idbModules = {};
                                 switch(value.$type) {
                                     case 'blob':
                                     case 'file': 
-                                        value = dataURLToBlob(value.$enc);
+                                        value = U.dataURLToBlob(value.$enc);
                                         break;
                                     case 'bool':
                                         value = Boolean(value.$enc === 'true');
@@ -746,8 +717,10 @@ var idbModules = {};
      * http://www.w3.org/TR/IndexedDB/#idl-def-IDBIndex
      * @param {Object} name;
      * @param {Object} objectStore;
-     */
-    function IDBIndex(indexName, idbObjectStore){
+    **/
+    function IDBIndex(indexName, idbObjectStore, optionalParams){
+//        this.indexName = indexName;
+//        this.__idbObjectStore = this.source = idbObjectStore;
         this.indexName = this.name = indexName;
         this.__idbObjectStore = this.objectStore = this.source = idbObjectStore;
         
@@ -755,18 +728,22 @@ var idbModules = {};
         indexList && (indexList = JSON.parse(indexList));
         
         this.keyPath = ((indexList && indexList[indexName] && indexList[indexName].keyPath) || indexName);
+      optionalParams = optionalParams || {};
         ['multiEntry','unique'].forEach(function(prop){
-            this[prop] = !!indexList && !!indexList[indexName] && !!indexList[indexName].optionalParams && !!indexList[indexName].optionalParams[prop];
+          this[prop] = optionalParams[prop] || !!indexList && !!indexList[indexName] && !!indexList[indexName].optionalParams && !!indexList[indexName].optionalParams[prop];
         }, this);
     }
     
     IDBIndex.prototype.__createIndex = function(indexName, keyPath, optionalParameters){
         var me = this;
         var transaction = me.__idbObjectStore.transaction;
-        transaction.__addToTransactionQueue(function(tx, args, success, failure){
+      transaction.tq.queueTask("create index " + indexName, function() {
+        var defer = this;
+        transaction.db.__db.transaction(function(tx){
             me.__idbObjectStore.__getStoreProps(tx, function(){
                 function error(){
                     idbModules.util.throwDOMException(0, "Could not create new index", arguments);
+                defer.reject();
                 }
                 if (transaction.mode !== 2) {
                     idbModules.util.throwDOMException(0, "Invalid State error, not a version transaction", me.transaction);
@@ -792,7 +769,7 @@ var idbModules = {};
                             if (i < data.rows.length) {
                                 try {
                                     var value = idbModules.Sca.decode(data.rows.item(i).value);
-                                    var indexKey = eval("value['" + keyPath + "']");
+                                var indexKey = value[keyPath];
                                     tx.executeSql("UPDATE " + idbModules.util.quote(me.__idbObjectStore.name) + " set " + columnName + " = ? where key = ?", [idbModules.Key.encode(indexKey), data.rows.item(i).key], function(tx, data){
                                         initIndexForRow(i + 1);
                                     }, error);
@@ -806,7 +783,7 @@ var idbModules = {};
                                 idbModules.DEBUG && console.log("Updating the indexes in table", me.__idbObjectStore.__storeProps);
                                 tx.executeSql("UPDATE __sys__ set indexList = ? where name = ?", [me.__idbObjectStore.__storeProps.indexList, me.__idbObjectStore.name], function(){
                                     me.__idbObjectStore.__setReadyState("createIndex", true);
-                                    success(me);
+                                defer.resolve(me);
                                 }, error);
                             }
                         }(0));
@@ -814,6 +791,7 @@ var idbModules = {};
                 }, error);
             }, "createObjectStore");
         });
+      }, false, 100);
     };
     
     IDBIndex.prototype.openCursor = function(range, direction){
@@ -995,7 +973,7 @@ var idbModules = {};
                 }
                 if (value) {
                     try {
-                        var primaryKey = eval("value['" + props.keyPath + "']");
+                        var primaryKey = value[props.keyPath];
                         if (!primaryKey) {
                             if (props.autoInc === "true") {
                                 getNextAutoIncKey();
@@ -1041,7 +1019,7 @@ var idbModules = {};
         var indexes = JSON.parse(this.__storeProps.indexList);
         for (var key in indexes) {
             try {
-                paramMap[indexes[key].columnName] = idbModules.Key.encode(eval("value['" + indexes[key].keyPath + "']"));
+                paramMap[indexes[key].columnName] = idbModules.Key.encode(value[indexes[key].keyPath]);
             } 
             catch (e) {
                 error(e);
@@ -1194,10 +1172,10 @@ var idbModules = {};
         var me = this;
         optionalParameters = optionalParameters || {};
         me.__setReadyState("createIndex", false);
-        var result = new idbModules.IDBIndex(indexName, me);
-        me.__waitForReady(function(){
+        var result = new idbModules.IDBIndex(indexName, me, optionalParameters);
+//        me.__waitForReady(function(){
             result.__createIndex(indexName, keyPath, optionalParameters);
-        }, "createObjectStore");
+//        }, "createObjectStore");
         me.indexNames.push(indexName);
         return result;
     };
@@ -1393,12 +1371,17 @@ var idbModules = {};
         var result = new idbModules.IDBObjectStore(storeName, me.__versionTransaction, false);
         
         var transaction = me.__versionTransaction;
-        transaction.__addToTransactionQueue(function(tx, args, success, failure){
+      transaction.tq.queueTask("create object store " + storeName, function() {
+        var defer = this;
+//          transaction.__addToTransactionQueue(function(tx, args, success, failure){
+        transaction.db.__db.transaction(function(tx){
             function error(){
+            defer.reject();
                 idbModules.util.throwDOMException(0, "Could not create new object store", arguments);
             }
             
             if (!me.__versionTransaction) {
+            defer.reject();
                 idbModules.util.throwDOMException(0, "Invalid State error", me.transaction);
             }
             //key INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL UNIQUE
@@ -1407,27 +1390,33 @@ var idbModules = {};
             tx.executeSql(sql, [], function(tx, data){
                 tx.executeSql("INSERT INTO __sys__ VALUES (?,?,?,?)", [storeName, createOptions.keyPath, createOptions.autoIncrement ? true : false, "{}"], function(){
                     result.__setReadyState("createObjectStore", true);
-                    success(result);
+                  defer.resolve(result);
                 }, error);
             }, error);
         });
+      }, false, 100);
         
-        // The IndexedDB Specification needs us to return an Object Store immediatly, but WebSQL does not create and return the store immediatly
+      // The IndexedDB Specification needs us to return an Object Store immediately, but WebSQL does not create and return the store immediatly
         // Hence, this can technically be unusable, and we hack around it, by setting the ready value to false
         me.objectStoreNames.push(storeName);
         return result;
     };
     
     IDBDatabase.prototype.deleteObjectStore = function(storeName){
+      var me = this;
+      var transaction = me.__versionTransaction;
+      transaction.tq.queueTask("delete object store " + storeName, function() {
+        var defer = this;
+//        return $.Deferred(function (defer) {
         var error = function(){
+          defer.reject();
             idbModules.util.throwDOMException(0, "Could not delete ObjectStore", arguments);
         };
-        var me = this;
         !me.objectStoreNames.contains(storeName) && error("Object Store does not exist");
         me.objectStoreNames.splice(me.objectStoreNames.indexOf(storeName), 1);
         
         var transaction = me.__versionTransaction;
-        transaction.__addToTransactionQueue(function(tx, args, success, failure){
+        transaction.db.__db.transaction(function(tx){
             if (!me.__versionTransaction) {
                 idbModules.util.throwDOMException(0, "Invalid State error", me.transaction);
             }
@@ -1436,12 +1425,14 @@ var idbModules = {};
                     if (data.rows.length > 0) {
                         tx.executeSql("DROP TABLE " + idbModules.util.quote(storeName), [], function(){
                             tx.executeSql("DELETE FROM __sys__ WHERE name = ?", [storeName], function(){
+                              defer.resolve();
                             }, error);
                         }, error);
                     }
                 });
             });
         });
+      }, false, 100);
     };
     
     IDBDatabase.prototype.close = function(){
@@ -1525,10 +1516,14 @@ var idbModules = {};
                                         var e = idbModules.Event("upgradeneeded");
                                         e.oldVersion = oldVersion;
                                         e.newVersion = version;
-                                        req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction([], 2, req.source);
+                                        var trans = req.transaction = req.result.__versionTransaction = new idbModules.IDBTransaction([], 2, req.source);
+                                        trans.tq = new TaskQueue("IDBShim upgrade to " + version);
                                         idbModules.util.callback("onupgradeneeded", req, e, function(){
+                                          trans.tq.queueTask("Complete upgrade transaction", function() {
                                             var e = idbModules.Event("success");
                                             idbModules.util.callback("onsuccess", req, e);
+                                            this.resolve();
+                                          }, true, 10);
                                         });
                                     }, dbCreateError);
                                 }, dbCreateError);
@@ -1641,7 +1636,10 @@ var idbModules = {};
                 window.indexedDB = idbModules.shimIndexedDB;
                 window.IDBDatabase = idbModules.IDBDatabase;
                 window.IDBTransaction = idbModules.IDBTransaction;
+                window.IDBRequest = idbModules.IDBRequest;
+                window.IDBObjectStore = idbModules.IDBObjectStore;
                 window.IDBCursor = idbModules.IDBCursor;
+                window.IDBIndex = idbModules.IDBIndex;
                 window.IDBKeyRange = idbModules.IDBKeyRange;
             };
             window.shimIndexedDB.__debug = function(val){
@@ -1659,6 +1657,9 @@ var idbModules = {};
         window.IDBDatabase = window.IDBDatabase || window.webkitIDBDatabase;
         window.IDBTransaction = window.IDBTransaction || window.webkitIDBTransaction;
         window.IDBCursor = window.IDBCursor || window.webkitIDBCursor;
+        window.IDBRequest = window.IDBRequest || window.webkitIDBRequest;
+        window.IDBIndex = window.IDBIndex || window.webkitIDBIndex;
+        window.IDBObjectStore = window.IDBObjectStore || window.webkitIDBObjectStore;
         window.IDBKeyRange = window.IDBKeyRange || window.webkitIDBKeyRange;
         if(!window.IDBTransaction){
             window.IDBTransaction = {};
@@ -1669,3 +1670,4 @@ var idbModules = {};
     
 }(window, idbModules));
 
+})
